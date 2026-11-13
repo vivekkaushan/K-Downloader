@@ -10,3 +10,5 @@ This application packages third-party open-source components. Their own license 
 - **PyInstaller** — GPL with exception (used as a build tool, not imported as an application runtime dependency): https://pyinstaller.org/
 
 Before publishing installers, retain the license files and notices included with the exact dependency versions you bundle. This file is an index, not a substitute for the complete license texts.
+
+Other components: **Python** (PSF License) and **Tcl/Tk** (BSD-style), bundled by PyInstaller; **Inno Setup** (build tool for the Windows installer).

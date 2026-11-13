@@ -1,5 +1,5 @@
 #define MyAppName "K Downloader"
-#define MyAppVersion "2.3.1"
+#define MyAppVersion "3.0.0"
 #define MyAppPublisher "KAUSHAN"
 #define MyAppExeName "K Downloader.exe"
 

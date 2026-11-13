@@ -21,7 +21,9 @@ if exist dist rmdir /s /q dist
 py -m PyInstaller --noconfirm --clean --windowed ^
   --name "K Downloader" ^
   --icon "assets\k_downloader.ico" ^
+  --paths src ^
   --add-data "assets\k_downloader_logo.png;." ^
+  --add-data "assets\k_downloader.ico;." ^
   --collect-all customtkinter ^
   --collect-all imageio_ffmpeg ^
   --collect-all yt_dlp ^
