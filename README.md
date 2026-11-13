@@ -4,6 +4,7 @@
 
 - Fetch a playlist, see titles and durations, select all/none or individual videos
 - MP4 up to 360p / 480p / 720p / 1080p / best, and MP3 at 128 / 192 / 320 kbps / best
+- Fast downloads: up to 4 videos at once (Settings → Simultaneous downloads, default 2) and parallel fragment downloading inside each video
 - Per-video and overall progress, speed, ETA, stop / cancel / retry failed
 - Choose and remember a download folder; existing files are never overwritten
 - Download history, settings, dark and light themes

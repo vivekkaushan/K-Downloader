@@ -272,19 +272,37 @@ class _Failure(Exception):
         self.friendly = friendly
 
 
-class DownloadManager:
-    """Runs downloads one at a time on a background thread.
+# Speed tuning (all are standard yt-dlp options and work the same on Windows and macOS).
+MAX_PARALLEL = 4                 # upper bound for simultaneous videos
+DEFAULT_PARALLEL = 2
+FRAGMENT_THREADS = 4             # parallel fragments inside one DASH/HLS download
+HTTP_CHUNK_SIZE = 10 * 1024 * 1024   # ranged requests avoid per-connection throttling
+BUFFER_SIZE = 64 * 1024          # yt-dlp's default of 1 KiB means many tiny reads
 
-    The worker thread exists only while there is work, so an idle app has no
-    background activity.
+
+def clamp_parallel(value) -> int:
+    try:
+        return max(1, min(MAX_PARALLEL, int(value)))
+    except (TypeError, ValueError):
+        return DEFAULT_PARALLEL
+
+
+class DownloadManager:
+    """Runs downloads on a small pool of background threads (1-4 videos at once).
+
+    Worker threads exist only while there is work, so an idle app has no
+    background activity. Each item has its own cancel flag.
     """
 
     PROGRESS_INTERVAL = 0.2
 
     def __init__(self, emit: Callable[[str, object], None], ffmpeg_path: Optional[str] = None,
                  ydl_factory: Optional[Callable] = None, min_free_bytes: int = MIN_FREE_BYTES,
-                 retry_delays: Tuple[float, ...] = (3.0, 8.0)):
+                 retry_delays: Tuple[float, ...] = (3.0, 8.0), parallel: int = DEFAULT_PARALLEL,
+                 fragment_threads: int = FRAGMENT_THREADS):
         self._emit = emit
+        self._parallel = clamp_parallel(parallel)
+        self._fragment_threads = max(1, int(fragment_threads))
         self.ffmpeg_path = ffmpeg_path
         self._ydl_factory = ydl_factory or yt_dlp.YoutubeDL
         self._min_free = min_free_bytes
@@ -292,9 +310,8 @@ class DownloadManager:
         self._lock = threading.RLock()
         self._items: Dict[str, DownloadItem] = {}
         self._queue: deque = deque()
-        self._current_id: Optional[str] = None
-        self._item_cancel = threading.Event()
-        self._thread: Optional[threading.Thread] = None
+        self._cancel_flags: Dict[str, threading.Event] = {}   # active items only
+        self._threads: List[threading.Thread] = []
 
     # -- public API -------------------------------------------------------
 
@@ -314,7 +331,7 @@ class DownloadManager:
                 accepted.append(item)
                 self._emit("added", dataclasses.replace(item))
             if accepted:
-                self._ensure_worker()
+                self._ensure_workers()
         return accepted, duplicates
 
     def cancel(self, item_id: str) -> None:
@@ -328,8 +345,8 @@ class DownloadManager:
                 except ValueError:
                     pass
                 self._finish(item, Status.CANCELLED)
-            elif item_id == self._current_id and item.status in Status.ACTIVE:
-                self._item_cancel.set()
+            elif item.status in Status.ACTIVE and item_id in self._cancel_flags:
+                self._cancel_flags[item_id].set()
 
     def stop_all(self) -> None:
         with self._lock:
@@ -337,8 +354,18 @@ class DownloadManager:
                 item = self._items.get(self._queue.popleft())
                 if item and item.status == Status.QUEUED:
                     self._finish(item, Status.CANCELLED)
-            if self._current_id:
-                self._item_cancel.set()
+            for flag in self._cancel_flags.values():
+                flag.set()
+
+    @property
+    def parallel(self) -> int:
+        return self._parallel
+
+    def set_parallel(self, count) -> None:
+        """Change how many videos download at once (takes effect immediately)."""
+        with self._lock:
+            self._parallel = clamp_parallel(count)
+            self._ensure_workers()
 
     def retry(self, item_ids: Optional[Iterable[str]] = None) -> int:
         """Re-queue Failed/Cancelled items (all of them when *item_ids* is None)."""
@@ -358,7 +385,7 @@ class DownloadManager:
                 count += 1
                 self._emit("progress", dataclasses.replace(item))
             if count:
-                self._ensure_worker()
+                self._ensure_workers()
         return count
 
     def remove(self, item_ids: Iterable[str]) -> None:
@@ -389,22 +416,22 @@ class DownloadManager:
 
     def is_active(self) -> bool:
         with self._lock:
-            return bool(self._queue) or self._current_id is not None
+            return bool(self._queue) or bool(self._cancel_flags)
 
     def stats(self) -> Dict[str, object]:
         return summarize(self.snapshot())
 
     def shutdown(self, timeout: float = 5.0) -> None:
         self.stop_all()
-        thread = self._thread
-        if thread and thread.is_alive():
-            thread.join(timeout)
+        deadline = time.monotonic() + timeout
+        for thread in list(self._threads):
+            thread.join(max(0.0, deadline - time.monotonic()))
 
     def wait_idle(self, timeout: float = 30.0) -> bool:
         """Block until the worker has finished (used by tests)."""
-        thread = self._thread
-        if thread:
-            thread.join(timeout)
+        deadline = time.monotonic() + timeout
+        for thread in list(self._threads):
+            thread.join(max(0.0, deadline - time.monotonic()))
         return not self.is_active()
 
     # -- internals --------------------------------------------------------
@@ -417,36 +444,59 @@ class DownloadManager:
                 return True
         return False
 
-    def _ensure_worker(self) -> None:
-        if self._thread is None or not self._thread.is_alive():
-            self._thread = threading.Thread(target=self._run, name="kd-downloads", daemon=True)
-            self._thread.start()
+    def _ensure_workers(self) -> None:
+        """Start enough worker threads for the queue (caller holds the lock)."""
+        self._threads = [t for t in self._threads if t.is_alive()]
+        wanted = min(self._parallel, len(self._queue) + len(self._cancel_flags))
+        while len(self._threads) < wanted:
+            thread = threading.Thread(target=self._run, name=f"kd-downloads-{len(self._threads) + 1}", daemon=True)
+            self._threads.append(thread)
+            thread.start()
+
+    def _next_item_locked(self) -> Optional[DownloadItem]:
+        """Oldest queued item whose target (folder + video) isn't already downloading."""
+        busy = {(i.dest_dir, i.video_id) for i in (self._items.get(k) for k in self._cancel_flags) if i}
+        deferred = []
+        chosen = None
+        while self._queue:
+            candidate = self._items.get(self._queue.popleft())
+            if not candidate or candidate.status != Status.QUEUED:
+                continue
+            if (candidate.dest_dir, candidate.video_id) in busy:
+                deferred.append(candidate.id)
+                continue
+            chosen = candidate
+            break
+        self._queue.extendleft(reversed(deferred))
+        return chosen
 
     def _run(self) -> None:
+        me = threading.current_thread()
         while True:
             with self._lock:
                 item = None
-                while self._queue:
-                    candidate = self._items.get(self._queue.popleft())
-                    if candidate and candidate.status == Status.QUEUED:
-                        item = candidate
-                        break
+                if len(self._cancel_flags) < self._parallel:
+                    item = self._next_item_locked()
                 if item is None:
-                    self._thread = None
+                    # A deferred twin is always picked up by the worker running its blocker,
+                    # so an idle worker can simply leave.
+                    if me in self._threads:
+                        self._threads.remove(me)
+                    last = not self._threads and not self._cancel_flags and not self._queue
                     break
-                self._current_id = item.id
-                self._item_cancel.clear()
+                cancel = self._cancel_flags[item.id] = threading.Event()
                 item.status = Status.DOWNLOADING
                 item.started_at = time.time()
                 self._emit("progress", dataclasses.replace(item))
             try:
-                self._process(item)
+                self._process(item, cancel)
             except Exception as exc:  # never let the worker die silently
                 self._finish_locked(item, Status.FAILED, friendly=classify_error(exc))
             finally:
                 with self._lock:
-                    self._current_id = None
-        self._emit("idle", self.stats())
+                    self._cancel_flags.pop(item.id, None)
+        if last:
+            self._emit("idle", self.stats())
 
     def _finish_locked(self, item: DownloadItem, status: str, friendly: Optional[FriendlyError] = None,
                        filepath: str = "") -> None:
@@ -476,7 +526,7 @@ class DownloadManager:
                 setattr(item, key, value)
             self._emit("progress", dataclasses.replace(item))
 
-    def _process(self, item: DownloadItem) -> None:
+    def _process(self, item: DownloadItem, cancel: threading.Event) -> None:
         ok, message = system.prepare_folder(item.dest_dir, self._min_free)
         if not ok:
             code = "disk_full" if "free space" in message else "folder"
@@ -489,11 +539,11 @@ class DownloadManager:
         attempt = 0
         while True:
             try:
-                path = self._download_once(item)
+                path = self._download_once(item, cancel)
                 self._finish_locked(item, Status.COMPLETED, filepath=path)
                 return
             except Exception as exc:
-                if self._item_cancel.is_set() or isinstance(exc, Cancelled):
+                if cancel.is_set() or isinstance(exc, Cancelled):
                     system.cleanup_partials(item.dest_dir, item.video_id)
                     self._finish_locked(item, Status.CANCELLED)
                     return
@@ -503,7 +553,7 @@ class DownloadManager:
                     attempt += 1
                     self._update(item, status=Status.DOWNLOADING, speed=None, eta=None,
                                  note=f"Connection problem — retrying ({attempt}/{len(self._retry_delays)})")
-                    if self._item_cancel.wait(delay):
+                    if cancel.wait(delay):
                         system.cleanup_partials(item.dest_dir, item.video_id)
                         self._finish_locked(item, Status.CANCELLED)
                         return
@@ -511,12 +561,12 @@ class DownloadManager:
                 self._finish_locked(item, Status.FAILED, friendly=friendly)
                 return
 
-    def _download_once(self, item: DownloadItem) -> str:
+    def _download_once(self, item: DownloadItem, cancel: threading.Event) -> str:
         preset = formats.get_preset(item.preset_id)
         state = {"stream": 0, "streams": 1, "last_emit": 0.0}
 
         def hook(data: dict) -> None:
-            if self._item_cancel.is_set():
+            if cancel.is_set():
                 raise Cancelled("Stopped by user")
             requested = (data.get("info_dict") or {}).get("requested_formats")
             if requested:
@@ -539,7 +589,7 @@ class DownloadManager:
                     self._update(item, status=Status.PROCESSING, progress=0.99, speed=None, eta=None)
 
         def pp_hook(data: dict) -> None:
-            if self._item_cancel.is_set():
+            if cancel.is_set():
                 raise Cancelled("Stopped by user")
             if data.get("status") == "started" and item.status != Status.PROCESSING:
                 self._update(item, status=Status.PROCESSING, speed=None, eta=None)
@@ -548,6 +598,8 @@ class DownloadManager:
             "outtmpl": os.path.join(item.dest_dir, "%(title).180B [%(id)s].%(ext)s"),
             "noplaylist": True, "continuedl": True, "overwrites": False, "windowsfilenames": True,
             "retries": 5, "fragment_retries": 5, "socket_timeout": 20, "ignoreerrors": False,
+            "concurrent_fragment_downloads": self._fragment_threads,
+            "http_chunk_size": HTTP_CHUNK_SIZE, "buffersize": BUFFER_SIZE,
             "quiet": True, "no_warnings": True, "noprogress": True, "logger": _QuietLogger(),
             "progress_hooks": [hook], "postprocessor_hooks": [pp_hook],
         }

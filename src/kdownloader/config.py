@@ -24,6 +24,7 @@ class Settings:
     default_audio_quality: str = formats.DEFAULT_AUDIO_PRESET
     keep_history: bool = True
     max_history: int = 500
+    parallel_downloads: int = 2   # videos downloaded at the same time (1-4)
 
     def effective_download_dir(self) -> str:
         return self.download_dir or str(paths.default_download_dir())
@@ -49,6 +50,9 @@ def sanitize(data: Any) -> Settings:
     mh = data.get("max_history")
     if isinstance(mh, int) and not isinstance(mh, bool) and 10 <= mh <= 5000:
         s.max_history = mh
+    pd = data.get("parallel_downloads")
+    if isinstance(pd, int) and not isinstance(pd, bool) and 1 <= pd <= 4:
+        s.parallel_downloads = pd
     return s
 
 
