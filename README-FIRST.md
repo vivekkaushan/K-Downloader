@@ -1,7 +1,7 @@
 # K Downloader — Public Distribution Kit
 
 Product name: **K Downloader**
-Version: **2.3.0**  
+Version: **2.3.1**  
 Publisher: **KAUSHAN**  
 Facebook: https://www.facebook.com/KaushanOfficial
 
@@ -43,17 +43,17 @@ On first launch, K Downloader shows a welcome screen with a button to open the K
 
 
 ## Build installers automatically with GitHub Actions
-A workflow is included at `.github/workflows/build-installers.yml`. It builds:
-- Windows x64 `Setup.exe`
-- macOS Intel `x86_64.dmg`
-- macOS Apple Silicon `arm64.dmg`
+A workflow is included at `.github/workflows/main.yml`. It builds:
+- Windows x64 installer: `K-Downloader-Windows-Setup.exe`
+- macOS Intel: `K-Downloader-macOS-Intel.dmg`
+- macOS Apple Silicon: `K-Downloader-macOS-Apple-Silicon.dmg`
 
 To use it:
 1. Create a private or public GitHub repository and upload the contents of this kit.
 2. Open the repository's Actions tab.
 3. Select **Build K Downloader installers**.
 4. Click **Run workflow**.
-5. When all jobs finish, open the workflow run and download the three installer artifacts.
+5. When all jobs finish, open the workflow run and download the three installer artifacts (each is a zip containing one installer).
 
 The workflow uses GitHub-hosted Windows and Mac machines, so you do not need to own both operating systems to run the builds. These builds are currently unsigned. Public Mac distribution still needs Apple Developer ID signing and notarization; Windows signing is also recommended. The GitHub Actions workflow does not perform signing or notarization.
 

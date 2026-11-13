@@ -61,9 +61,13 @@ else
 fi
 
 # Create drag-and-drop DMG.
-DMG="release/macos/K-Downloader-2.3.1-$(uname -m).dmg"
+if [[ "$(uname -m)" == "arm64" ]]; then LABEL="Apple-Silicon"; else LABEL="Intel"; fi
+DMG="release/macos/K-Downloader-macOS-${LABEL}.dmg"
+mkdir -p build/dmg_root
+cp -R "$APP" build/dmg_root/
+ln -s /Applications build/dmg_root/Applications
 hdiutil create -volname "K Downloader" \
-  -srcfolder "$APP" -ov -format UDZO "$DMG"
+  -srcfolder build/dmg_root -ov -format UDZO "$DMG"
 
 echo
 echo "Created: $DMG"

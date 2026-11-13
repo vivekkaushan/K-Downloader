@@ -3,6 +3,8 @@ name: Build K Downloader installers
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
     tags:
       - "v*"
 
@@ -22,52 +24,96 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies and package app
-        shell: cmd
+      - name: Verify repository files
+        shell: pwsh
+        run: |
+          $required = @(
+            "src/playlist_downloader.py",
+            "src/requirements.txt",
+            "assets/k_downloader.ico",
+            "assets/k_downloader_logo.png",
+            "windows/K-Downloader-Setup.iss"
+          )
+          foreach ($f in $required) {
+            if (-not (Test-Path $f)) { throw "Missing required file: $f" }
+          }
+
+      - name: Install dependencies
+        shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r src\requirements.txt pyinstaller
-          python -m PyInstaller --noconfirm --clean --windowed ^
-            --name "K Downloader" ^
-            --icon "assets\k_downloader.ico" ^
-            --add-data "assets\k_downloader_logo.png;." ^
-            --collect-all customtkinter ^
-            --collect-all imageio_ffmpeg ^
-            --collect-all yt_dlp ^
-            --hidden-import tkinter ^
-            --hidden-import tkinter.filedialog ^
-            --hidden-import tkinter.messagebox ^
+          python -m pip install -r src/requirements.txt pyinstaller
+          python -c "import customtkinter, yt_dlp, imageio_ffmpeg, PIL, tkinter; print('Dependencies import OK')"
+
+      - name: Package app with PyInstaller
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean --windowed `
+            --name "K Downloader" `
+            --icon "assets\k_downloader.ico" `
+            --add-data "assets\k_downloader_logo.png;." `
+            --collect-all customtkinter `
+            --collect-all imageio_ffmpeg `
+            --collect-all yt_dlp `
+            --hidden-import tkinter `
+            --hidden-import tkinter.filedialog `
+            --hidden-import tkinter.messagebox `
             src\playlist_downloader.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path "dist\K Downloader\K Downloader.exe")) { throw "PyInstaller did not produce dist\K Downloader\K Downloader.exe" }
 
       - name: Install Inno Setup
         shell: pwsh
-        run: choco install innosetup --yes --no-progress
+        run: |
+          function Find-Iscc {
+            foreach ($root in @(${env:ProgramFiles(x86)}, $env:ProgramFiles)) {
+              if (-not $root) { continue }
+              $dir = Get-ChildItem -Path $root -Directory -Filter "Inno Setup*" -ErrorAction SilentlyContinue |
+                Sort-Object Name -Descending | Select-Object -First 1
+              if ($dir -and (Test-Path (Join-Path $dir.FullName "ISCC.exe"))) {
+                return (Join-Path $dir.FullName "ISCC.exe")
+              }
+            }
+            return $null
+          }
+          $iscc = Find-Iscc
+          if (-not $iscc) {
+            choco install innosetup --yes --no-progress
+            $iscc = Find-Iscc
+          }
+          if (-not $iscc) { throw "ISCC.exe (Inno Setup compiler) not found" }
+          "ISCC=$iscc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Using $iscc"
 
-      - name: Build Setup.exe
+      - name: Build Windows installer
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force release/windows | Out-Null
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" windows/K-Downloader-Setup.iss
+          & $env:ISCC "windows\K-Downloader-Setup.iss"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path "release\windows\K-Downloader-Windows-Setup.exe")) { throw "Installer K-Downloader-Windows-Setup.exe was not produced" }
 
       - name: Upload Windows installer
         uses: actions/upload-artifact@v4
         with:
           name: K-Downloader-Windows-Setup
-          path: release/windows/*.exe
+          path: release/windows/K-Downloader-Windows-Setup.exe
           if-no-files-found: error
 
   build-macos:
-    name: macOS DMG (${{ matrix.arch }})
+    name: macOS DMG (${{ matrix.label }})
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-13
-            arch: x86_64
-          - runner: macos-14
-            arch: arm64
+          # macos-13 was retired by GitHub in Dec 2025; macos-15-intel is the Intel runner.
+          - runner: macos-15-intel
+            label: Intel
+            machine: x86_64
+          - runner: macos-15
+            label: Apple-Silicon
+            machine: arm64
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -77,29 +123,47 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Build macOS app and DMG
+      - name: Verify runner architecture and repository files
         shell: bash
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r src/requirements.txt pyinstaller
-          mkdir -p build/kaushan.iconset release/macos
-          python - <<'PY'
+          test "$(uname -m)" = "${{ matrix.machine }}" || { echo "Expected ${{ matrix.machine }}, got $(uname -m)"; exit 1; }
+          for f in src/playlist_downloader.py src/requirements.txt assets/k_downloader_logo.png; do
+            test -f "$f" || { echo "Missing required file: $f"; exit 1; }
+          done
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -r src/requirements.txt pyinstaller
+          python3 -c "import customtkinter, yt_dlp, imageio_ffmpeg, PIL, tkinter; print('Dependencies import OK')"
+
+      - name: Create macOS icon from logo
+        shell: bash
+        run: |
+          mkdir -p build/kaushan.iconset
+          python3 - <<'PY'
           from PIL import Image
           from pathlib import Path
           im = Image.open("assets/k_downloader_logo.png").convert("RGBA")
           sizes = {
-              "icon_16x16.png":16, "icon_16x16@2x.png":32,
-              "icon_32x32.png":32, "icon_32x32@2x.png":64,
-              "icon_128x128.png":128, "icon_128x128@2x.png":256,
-              "icon_256x256.png":256, "icon_256x256@2x.png":512,
-              "icon_512x512.png":512,
+              "icon_16x16.png": 16, "icon_16x16@2x.png": 32,
+              "icon_32x32.png": 32, "icon_32x32@2x.png": 64,
+              "icon_128x128.png": 128, "icon_128x128@2x.png": 256,
+              "icon_256x256.png": 256, "icon_256x256@2x.png": 512,
+              "icon_512x512.png": 512, "icon_512x512@2x.png": 1024,
           }
           out = Path("build/kaushan.iconset")
           for name, size in sizes.items():
               im.resize((size, size), Image.Resampling.LANCZOS).save(out / name)
           PY
           iconutil -c icns build/kaushan.iconset -o assets/k_downloader.icns
-          python -m PyInstaller --noconfirm --clean --windowed \
+          test -f assets/k_downloader.icns
+
+      - name: Package app with PyInstaller
+        shell: bash
+        run: |
+          python3 -m PyInstaller --noconfirm --clean --windowed \
             --name "K Downloader" \
             --icon "assets/k_downloader.icns" \
             --add-data "assets/k_downloader_logo.png:." \
@@ -110,13 +174,22 @@ jobs:
             --hidden-import tkinter.filedialog \
             --hidden-import tkinter.messagebox \
             src/playlist_downloader.py
+          test -d "dist/K Downloader.app" || { echo "PyInstaller did not produce dist/K Downloader.app"; exit 1; }
+
+      - name: Build DMG
+        shell: bash
+        run: |
+          mkdir -p release/macos build/dmg_root
+          cp -R "dist/K Downloader.app" build/dmg_root/
+          ln -s /Applications build/dmg_root/Applications
           hdiutil create -volname "K Downloader" \
-            -srcfolder "dist/K Downloader.app" -ov -format UDZO \
-            "release/macos/K-Downloader-2.3.1-${{ matrix.arch }}.dmg"
+            -srcfolder build/dmg_root -ov -format UDZO \
+            "release/macos/K-Downloader-macOS-${{ matrix.label }}.dmg"
+          test -f "release/macos/K-Downloader-macOS-${{ matrix.label }}.dmg"
 
       - name: Upload macOS disk image
         uses: actions/upload-artifact@v4
         with:
-          name: K-Downloader-macOS-${{ matrix.arch }}
-          path: release/macos/*.dmg
+          name: K-Downloader-macOS-${{ matrix.label }}
+          path: release/macos/K-Downloader-macOS-${{ matrix.label }}.dmg
           if-no-files-found: error
