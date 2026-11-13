@@ -40,6 +40,8 @@ mkdir -p release/macos
 python3 -m PyInstaller --noconfirm --clean --windowed \
   --name "K Downloader" \
   --icon "assets/k_downloader.icns" \
+  --paths src \
+  --osx-bundle-identifier com.kaushan.kdownloader \
   --add-data "assets/k_downloader_logo.png:." \
   --collect-all customtkinter \
   --collect-all imageio_ffmpeg \

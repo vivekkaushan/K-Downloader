@@ -1,7 +1,7 @@
 # K Downloader — Public Distribution Kit
 
 Product name: **K Downloader**
-Version: **2.3.1**  
+Version: **3.0.0**  
 Publisher: **KAUSHAN**  
 Facebook: https://www.facebook.com/KaushanOfficial
 

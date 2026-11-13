@@ -1,4 +1,4 @@
 K Downloader
 Publisher: KAUSHAN
-Version: 2.3.1
+Version: 3.0.0
 Includes GitHub Actions native installer build workflow.

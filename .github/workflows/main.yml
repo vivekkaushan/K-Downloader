@@ -11,9 +11,35 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  test:
+    name: Tests (Linux, headless)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install system packages
+        run: sudo apt-get update && sudo apt-get install -y python3-tk xvfb ffmpeg
+
+      - name: Install dependencies
+        run: python -m pip install -r src/requirements.txt
+
+      - name: Run tests
+        run: xvfb-run -a python -m unittest discover -s tests -v
+
   build-windows:
     name: Windows Setup.exe
+    needs: test
     runs-on: windows-latest
     steps:
       - name: Check out source
@@ -29,6 +55,7 @@ jobs:
         run: |
           $required = @(
             "src/playlist_downloader.py",
+            "src/kdownloader/app_main.py",
             "src/requirements.txt",
             "assets/k_downloader.ico",
             "assets/k_downloader_logo.png",
@@ -51,7 +78,9 @@ jobs:
           python -m PyInstaller --noconfirm --clean --windowed `
             --name "K Downloader" `
             --icon "assets\k_downloader.ico" `
+            --paths src `
             --add-data "assets\k_downloader_logo.png;." `
+            --add-data "assets\k_downloader.ico;." `
             --collect-all customtkinter `
             --collect-all imageio_ffmpeg `
             --collect-all yt_dlp `
@@ -102,6 +131,7 @@ jobs:
 
   build-macos:
     name: macOS DMG (${{ matrix.label }})
+    needs: test
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -127,7 +157,7 @@ jobs:
         shell: bash
         run: |
           test "$(uname -m)" = "${{ matrix.machine }}" || { echo "Expected ${{ matrix.machine }}, got $(uname -m)"; exit 1; }
-          for f in src/playlist_downloader.py src/requirements.txt assets/k_downloader_logo.png; do
+          for f in src/playlist_downloader.py src/kdownloader/app_main.py src/requirements.txt assets/k_downloader_logo.png; do
             test -f "$f" || { echo "Missing required file: $f"; exit 1; }
           done
 
@@ -166,6 +196,8 @@ jobs:
           python3 -m PyInstaller --noconfirm --clean --windowed \
             --name "K Downloader" \
             --icon "assets/k_downloader.icns" \
+            --paths src \
+            --osx-bundle-identifier com.kaushan.kdownloader \
             --add-data "assets/k_downloader_logo.png:." \
             --collect-all customtkinter \
             --collect-all imageio_ffmpeg \
@@ -193,3 +225,26 @@ jobs:
           name: K-Downloader-macOS-${{ matrix.label }}
           path: release/macos/K-Downloader-macOS-${{ matrix.label }}.dmg
           if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download installers
+        uses: actions/download-artifact@v4
+        with:
+          path: release-files
+          merge-multiple: true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          ls -l release-files
+          gh release create "$TAG" release-files/* --repo "$GITHUB_REPOSITORY" --title "K Downloader $TAG" \
+            --notes "Unsigned builds. Windows may show SmartScreen and macOS may show an unidentified-developer warning; see README.md for how to open them."
