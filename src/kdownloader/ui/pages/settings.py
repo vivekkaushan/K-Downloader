@@ -34,6 +34,8 @@ class SettingsPage(Page):
         self._row(body, "Default video quality", self.vq)
         self.aq = widgets.option_menu(body, ["—"], command=self._aq, width=210)
         self._row(body, "Default audio quality", self.aq)
+        self.par = widgets.option_menu(body, ["1", "2", "3", "4"], command=self._par, width=110)
+        self._row(body, "Simultaneous downloads", self.par)
         self.hist = ctk.CTkSwitch(body, text="Keep a download history", command=self._hist, progress_color=theme.PRIMARY)
         self._row(body, "History", self.hist)
         self.max_menu = widgets.option_menu(body, ["100", "250", "500", "1000", "2500"], command=self._max, width=110)
@@ -80,6 +82,11 @@ class SettingsPage(Page):
         self.ctx.settings.default_audio_quality = self._amap[label]
         self._save()
 
+    def _par(self, v) -> None:
+        self.ctx.settings.parallel_downloads = int(v)
+        self.ctx.manager.set_parallel(int(v))
+        self._save()
+
     def _hist(self) -> None:
         self.ctx.settings.keep_history = bool(self.hist.get())
         self._save()
@@ -100,6 +107,7 @@ class SettingsPage(Page):
         self.vq.set(next((p.label for p in vp if p.id == s.default_video_quality), vp[0].label))
         self.aq.configure(values=list(self._amap))
         self.aq.set(next((p.label for p in ap if p.id == s.default_audio_quality), ap[0].label))
+        self.par.set(str(s.parallel_downloads))
         self.hist.select() if s.keep_history else self.hist.deselect()
         self.max_menu.set(str(s.max_history) if str(s.max_history) in ("100", "250", "500", "1000", "2500") else "500")
         if self.ctx.ffmpeg_ok:

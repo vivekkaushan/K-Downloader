@@ -45,7 +45,8 @@ class KDownloaderApp(ctk.CTk):
         history.set_max(settings.max_history)
         ffmpeg = system.find_ffmpeg()
         manager = DownloadManager(lambda kind, payload: self.dispatcher.post(self._on_event, kind, payload),
-                                  ffmpeg_path=ffmpeg, min_free_bytes=MIN_FREE_BYTES)
+                                  ffmpeg_path=ffmpeg, min_free_bytes=MIN_FREE_BYTES,
+                                  parallel=settings.parallel_downloads)
         self.ctx = AppContext(self, store, settings, history, manager, self.dispatcher, ffmpeg)
         self.ctx.navigate = self.show_page
         self.ctx.settings_changed = self._settings_changed
@@ -149,6 +150,7 @@ class KDownloaderApp(ctk.CTk):
         self.side_note.configure(text=f"{busy} download(s) in progress" if busy else "")
 
     def _settings_changed(self) -> None:
+        self.ctx.manager.set_parallel(self.ctx.settings.parallel_downloads)
         for page in self.ctx.pages.values():
             page.on_settings_changed()
 
